@@ -1,69 +1,57 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AppShell, type NavTab } from './components/AppShell';
-import { AuthPortal } from './components/AuthPortal';
-import { BattleArenaView } from './components/BattleArenaView';
 import { DashboardView } from './components/DashboardView';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { LeagueView } from './components/LeagueView';
+import { HomeworkView } from './components/HomeworkView';
+import { MyProgressView } from './components/MyProgressView';
 import { PracticeLabView } from './components/PracticeLabView';
-import { TeacherConsoleView } from './components/TeacherConsoleView';
+import { SoloQuizView } from './components/SoloQuizView';
+import { buildHomeworkExportFilename } from './lib/homeQuizHelpers';
 import {
-  connectRealtimeStream,
-  fetchLeagueState,
-  getAuthSession,
-  loginWithCredentials,
-  logoutCurrentUser,
-  type AuthSessionUser,
-  type LeagueStateSnapshot,
-} from './lib/leagueApi';
-import type { StudentProfile } from './types/league';
+  clearReviewedMistake,
+  createDefaultLocalState,
+  exportHomeworkPayload,
+  getBrowserLocalStorage,
+  HOME_STORAGE_KEY,
+  loadLocalState,
+  recordCompletedQuiz,
+  recordPracticeCompletion,
+  recordQuestionAttempt,
+  restoreStudentBackup,
+  saveLocalState,
+  saveWritingDraft,
+  updateStudentDisplayName,
+  type LocalLoadStatus,
+  type LocalStudentState,
+  type UnitId,
+} from './lib/localLeagueStore';
 
-const EMPTY_STATE: LeagueStateSnapshot = {
-  students: [],
-  units: [],
-  questions: [],
-  answerKeys: {},
-  sessions: [],
-  participantsBySession: {},
-  submissionsBySession: {},
-  officialScores: [],
-  scoreEvents: [],
-  achievements: [],
-  practiceExercises: [],
-  practiceProgress: [],
-};
-
-function getInitialPinFromUrl(): string {
+function getInitialTheme(): 'light' | 'dark' {
   try {
-    const params = new URLSearchParams(window.location.search);
-    const pin = params.get('pin') ?? '';
-    return /^[A-Za-z0-9]{6}$/.test(pin) ? pin.toUpperCase() : '';
+    const saved = getBrowserLocalStorage()?.getItem('s404_theme');
+    return saved === 'light' ? 'light' : 'dark';
   } catch {
-    return '';
+    return 'dark';
   }
 }
 
 function AppContent() {
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('s404_theme');
-    return saved === 'light' ? 'light' : 'dark';
-  });
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => getInitialTheme());
 
-  const [isOnline, setIsOnline] = useState<boolean>(
-    typeof navigator !== 'undefined' ? navigator.onLine : true
+  const [initialLoad] = useState(() => loadLocalState(getBrowserLocalStorage()));
+  const [localState, setLocalState] = useState<LocalStudentState>(() => initialLoad.state);
+  const [loadStatus, setLoadStatus] = useState<LocalLoadStatus>(() => initialLoad.status);
+  const [storageNotice, setStorageNotice] = useState<string | null>(
+    () => initialLoad.error ?? null
   );
-  const [pendingOfflineCount, setPendingOfflineCount] = useState<number>(0);
-
-  const [authReady, setAuthReady] = useState<boolean>(false);
-  const [authUser, setAuthUser] = useState<AuthSessionUser | null>(null);
-  const [studentProfile, setStudentProfile] = useState<StudentProfile | null>(null);
-  const [authLoading, setAuthLoading] = useState<boolean>(false);
-  const [authError, setAuthError] = useState<string | null>(null);
+  const [storageAvailable, setStorageAvailable] = useState<boolean>(
+    () => getBrowserLocalStorage() !== null
+  );
 
   const [activeTab, setActiveTab] = useState<NavTab>('home');
-  const [practiceUnitFilter, setPracticeUnitFilter] = useState<string>('all');
-  const [initialPin, setInitialPin] = useState<string>(() => getInitialPinFromUrl());
-  const [leagueState, setLeagueState] = useState<LeagueStateSnapshot>(EMPTY_STATE);
+  const [quizUnitFilter, setQuizUnitFilter] = useState<UnitId | 'all'>('all');
+  const [practiceUnitFilter, setPracticeUnitFilter] = useState<UnitId | 'all'>('all');
+  const [focusMistakesToken, setFocusMistakesToken] = useState<number>(0);
 
   // Theme sync
   useEffect(() => {
@@ -73,235 +61,190 @@ function AppContent() {
     } else {
       root.classList.remove('dark');
     }
-    localStorage.setItem('s404_theme', theme);
+    try {
+      getBrowserLocalStorage()?.setItem('s404_theme', theme);
+    } catch {
+      // Ignore theme storage failures when browser storage is disabled
+    }
   }, [theme]);
 
-  // Browser online/offline status
-  useEffect(() => {
-    const onOnline = () => setIsOnline(true);
-    const onOffline = () => setIsOnline(false);
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
-    return () => {
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
-    };
-  }, []);
-
-  // Restore cookie session on load
-  useEffect(() => {
-    let active = true;
-    getAuthSession()
-      .then((res) => {
-        if (!active) return;
-        setAuthUser(res.user);
-        setStudentProfile(res.student);
-      })
-      .catch(() => {
-        if (!active) return;
-        setAuthUser(null);
-        setStudentProfile(null);
-      })
-      .finally(() => {
-        if (active) setAuthReady(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const refreshState = useCallback(async () => {
-    try {
-      const snapshot = await fetchLeagueState();
-      setLeagueState(snapshot);
-    } catch {
-      // handled by SSE or auth check
+  const commitState = (nextState: LocalStudentState) => {
+    setLocalState(nextState);
+    const storage = getBrowserLocalStorage();
+    setStorageAvailable(storage !== null);
+    const saved = saveLocalState(nextState, storage);
+    if (!saved.ok) {
+      setStorageNotice(saved.error ?? 'Unable to persist progress in browser storage.');
+    } else {
+      setLoadStatus('ok');
+      setStorageNotice(null);
     }
-  }, []);
+  };
 
-  // Live SSE sync + initial state load while signed in
-  useEffect(() => {
-    if (!authReady || !authUser) {
-      setLeagueState(EMPTY_STATE);
-      return;
-    }
+  const handleUpdateName = (name: string) => {
+    commitState(updateStudentDisplayName(localState, name));
+  };
 
-    let cancelled = false;
-    fetchLeagueState()
-      .then((snapshot) => {
-        if (!cancelled) setLeagueState(snapshot);
-      })
-      .catch(() => undefined);
+  const handleCommitQuiz = (params: {
+    unitId: UnitId | 'all';
+    gameTemplate: string;
+    items: Array<{ questionId: string; answerPayload: string }>;
+  }) => {
+    const res = recordCompletedQuiz(localState, params);
+    commitState(res.state);
+    return { quizRecord: res.quizRecord, xpEarnedDelta: res.xpEarnedDelta };
+  };
 
-    const disconnect = connectRealtimeStream({
-      onState: (snapshot) => {
-        if (!cancelled) {
-          setLeagueState(snapshot);
-          if (authUser.role === 'student') {
-            const freshMe = snapshot.students.find((s) => s.id === authUser.id) ?? null;
-            if (freshMe) setStudentProfile(freshMe);
-          }
-        }
-      },
-      onConnectionChange: (connected) => {
-        if (!cancelled && navigator.onLine) {
-          setIsOnline(connected);
-        }
-      },
-      onUnauthorized: () => {
-        if (!cancelled) {
-          setAuthUser(null);
-          setStudentProfile(null);
-          setLeagueState(EMPTY_STATE);
-        }
-      },
+  const handleCompletePracticeExercise = (exerciseId: string, response: string) => {
+    const res = recordPracticeCompletion(localState, { exerciseId, response });
+    commitState(res.state);
+    return { record: res.record, xpEarnedDelta: res.xpEarnedDelta };
+  };
+
+  const handleCompleteQuestionPractice = (questionId: string, answerPayload: string) => {
+    const res = recordQuestionAttempt(localState, { questionId, answerPayload });
+    commitState(res.state);
+    return {
+      isCorrect: res.isCorrect,
+      xpEarnedDelta: res.xpEarnedDelta,
+      correctAnswerDisplay: res.correctAnswerDisplay,
+      explanation: res.explanation,
+    };
+  };
+
+  const handleSaveWritingDraft = (itemId: string, draftText: string) => {
+    const next = saveWritingDraft(localState, itemId, draftText);
+    commitState(next);
+  };
+
+  const handleRetryMistake = (questionId: string, answerPayload: string) => {
+    const res = recordQuestionAttempt(localState, { questionId, answerPayload });
+    commitState(res.state);
+    return {
+      isCorrect: res.isCorrect,
+      xpEarnedDelta: res.xpEarnedDelta,
+      correctAnswerDisplay: res.correctAnswerDisplay,
+      explanation: res.explanation,
+    };
+  };
+
+  const handleClearMistake = (questionId: string) => {
+    commitState(clearReviewedMistake(localState, questionId));
+  };
+
+  const handleRestoreBackup = (rawJson: string) => {
+    const storage = getBrowserLocalStorage();
+    const res = restoreStudentBackup(rawJson, {
+      confirmReplace: true,
+      storage,
     });
-
-    return () => {
-      cancelled = true;
-      disconnect();
-    };
-  }, [authReady, authUser]);
-
-  const handleLogin = async (username: string, password: string) => {
-    setAuthLoading(true);
-    setAuthError(null);
-    try {
-      const res = await loginWithCredentials(username, password);
-      setAuthUser(res.user);
-      setStudentProfile(res.student);
-      setActiveTab(initialPin ? 'games' : 'home');
-    } finally {
-      setAuthLoading(false);
+    if (!res.ok || !res.state) {
+      return { ok: false, error: res.error ?? 'Unable to restore backup.' };
     }
+    setLocalState(res.state);
+    setStorageAvailable(storage !== null);
+    setLoadStatus('ok');
+    setStorageNotice(null);
+    return { ok: true };
   };
 
-  const handleLogout = async () => {
-    await logoutCurrentUser().catch(() => undefined);
-    setAuthUser(null);
-    setStudentProfile(null);
-    setLeagueState(EMPTY_STATE);
-    setActiveTab('home');
+  const handleExportBackup = () => {
+    const payload = exportHomeworkPayload(localState);
+    const jsonText = JSON.stringify(payload, null, 2);
+    const filename = buildHomeworkExportFilename(localState.studentName);
+    const blob = new Blob([jsonText], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
-  if (!authReady) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-[#070B16] text-sm text-slate-500 dark:text-slate-400">
-        Loading S404 — The English League...
-      </div>
-    );
-  }
-
-  if (!authUser || (authUser.role === 'student' && !studentProfile)) {
-    return (
-      <AuthPortal
-        theme={theme}
-        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-        onLogin={handleLogin}
-        loading={authLoading}
-        errorMessage={authError}
-      />
-    );
-  }
-
-  const role = authUser.role;
-  const displayName = role === 'teacher' ? 'Teacher' : studentProfile?.username ?? authUser.username;
+  const handleClearCorruptedStorage = () => {
+    const storage = getBrowserLocalStorage();
+    storage?.removeItem?.(HOME_STORAGE_KEY);
+    const fresh = createDefaultLocalState();
+    commitState(fresh);
+  };
 
   return (
     <AppShell
       activeTab={activeTab}
       onSelectTab={setActiveTab}
-      role={role}
-      displayName={displayName}
+      studentName={localState.studentName}
       theme={theme}
       onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-      isOnline={isOnline}
-      pendingOfflineCount={pendingOfflineCount}
-      onLogout={handleLogout}
+      storageAvailable={storageAvailable}
     >
       {activeTab === 'home' && (
         <DashboardView
-          role={role}
-          student={studentProfile}
-          students={leagueState.students}
-          officialScores={leagueState.officialScores}
-          achievements={leagueState.achievements}
-          units={leagueState.units}
-          sessions={leagueState.sessions}
-          practiceProgress={leagueState.practiceProgress}
+          state={localState}
+          loadStatus={loadStatus}
+          storageNotice={storageNotice}
+          onUpdateName={handleUpdateName}
           onNavigate={setActiveTab}
-          onQuickJoinSession={(pin) => {
-            setInitialPin(pin);
-            setActiveTab('games');
+          onStartUnitQuiz={(uId) => {
+            setQuizUnitFilter(uId);
+            setActiveTab('quiz');
           }}
-          onStartTopicPractice={(unitId) => {
-            setPracticeUnitFilter(unitId);
+          onStartUnitPractice={(uId) => {
+            setPracticeUnitFilter(uId);
             setActiveTab('practice');
           }}
+          onOpenMistakeReview={() => {
+            setActiveTab('progress');
+            setFocusMistakesToken((t) => t + 1);
+          }}
+          onExportBackup={handleExportBackup}
+          onClearCorruptedStorage={handleClearCorruptedStorage}
         />
       )}
 
-      {activeTab === 'games' && (
-        <BattleArenaView
-          role={role}
-          uid={authUser.id}
-          student={studentProfile}
-          units={leagueState.units}
-          questions={leagueState.questions}
-          answerKeys={leagueState.answerKeys}
-          sessions={leagueState.sessions}
-          participantsBySession={leagueState.participantsBySession}
-          submissionsBySession={leagueState.submissionsBySession}
-          isOnline={isOnline}
-          initialPin={initialPin}
-          onOfflineQueueChange={setPendingOfflineCount}
-          onRefreshState={refreshState}
-          onOpenTopicPractice={(unitId) => {
-            setPracticeUnitFilter(unitId);
-            setActiveTab('practice');
+      {activeTab === 'quiz' && (
+        <SoloQuizView
+          state={localState}
+          initialUnitFilter={quizUnitFilter}
+          onCommitQuiz={handleCommitQuiz}
+          onNavigateHome={() => setActiveTab('home')}
+          onOpenMistakeReview={() => {
+            setActiveTab('progress');
+            setFocusMistakesToken((t) => t + 1);
           }}
-        />
-      )}
-
-      {activeTab === 'leaderboard' && (
-        <LeagueView
-          students={leagueState.students}
-          officialScores={leagueState.officialScores}
-          achievements={leagueState.achievements}
-          scoreEvents={leagueState.scoreEvents}
-          currentStudentId={studentProfile?.id}
         />
       )}
 
       {activeTab === 'practice' && (
         <PracticeLabView
-          role={role}
-          student={studentProfile}
-          units={leagueState.units}
-          exercises={leagueState.practiceExercises}
-          progress={leagueState.practiceProgress}
+          state={localState}
           initialUnitFilter={practiceUnitFilter}
-          onRefreshState={refreshState}
+          onCompletePracticeExercise={handleCompletePracticeExercise}
+          onCompleteQuestionPractice={handleCompleteQuestionPractice}
+          onSaveWritingDraft={handleSaveWritingDraft}
         />
       )}
 
-      {activeTab === 'teacher' && role === 'teacher' && (
-        <TeacherConsoleView
-          teacherUid={authUser.id}
-          students={leagueState.students}
-          officialScores={leagueState.officialScores}
-          scoreEvents={leagueState.scoreEvents}
-          units={leagueState.units}
-          questions={leagueState.questions}
-          answerKeys={leagueState.answerKeys}
-          sessions={leagueState.sessions}
-          participantsBySession={leagueState.participantsBySession}
-          submissionsBySession={leagueState.submissionsBySession}
-          practiceProgress={leagueState.practiceProgress}
-          isOnline={isOnline}
-          onOfflineQueueChange={setPendingOfflineCount}
-          onRefreshState={refreshState}
+      {activeTab === 'progress' && (
+        <MyProgressView
+          state={localState}
+          focusMistakesToken={focusMistakesToken}
+          onRetryMistake={handleRetryMistake}
+          onClearMistake={handleClearMistake}
+          onStartUnitPractice={(uId) => {
+            setPracticeUnitFilter(uId);
+            setActiveTab('practice');
+          }}
+          onStartUnitQuiz={(uId) => {
+            setQuizUnitFilter(uId);
+            setActiveTab('quiz');
+          }}
         />
+      )}
+
+      {activeTab === 'homework' && (
+        <HomeworkView state={localState} onRestoreBackup={handleRestoreBackup} />
       )}
     </AppShell>
   );
