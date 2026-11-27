@@ -1,0 +1,70 @@
+name: CI — Lint, Test, Build & PostgreSQL Smoke Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: s404_test
+          POSTGRES_PASSWORD: s404_test_password
+          POSTGRES_DB: s404_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://s404_test:s404_test_password@127.0.0.1:5432/s404_test?sslmode=disable
+      SESSION_SECRET: ci-verification-signing-secret-0123456789
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript typecheck
+        run: npm run lint
+
+      - name: Run Drizzle PostgreSQL migrations
+        run: npm run db:migrate
+
+      - name: Run unit, HTTP, and PostgreSQL integration tests
+        run: npm test
+
+      - name: Build production frontend
+        run: npm run build
+
+      - name: Smoke-test production server against PostgreSQL
+        run: |
+          NODE_ENV=production PORT=3000 node server.ts &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null || true" EXIT
+
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3000/api/health/ready > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS http://127.0.0.1:3000/api/health/ready | grep -q '"database":"connected"'
+          curl -fsS http://127.0.0.1:3000/ | grep -q 'S404'

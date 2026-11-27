@@ -1,0 +1,6 @@
+{
+  "name": "S404 — The English League",
+  "description": "Think. Speak. Compete. Classroom games, practice, and leaderboard for S404 — The English League.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

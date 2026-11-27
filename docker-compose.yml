@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-s404}
+      POSTGRES_USER: ${POSTGRES_USER:-s404_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - s404_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-s404_app} -d ${POSTGRES_DB:-s404}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    image: ${S404_IMAGE:-s404-english-league:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-s404_app}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-s404}?sslmode=disable
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-auto}
+      TEACHER_PASSWORD: ${TEACHER_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      LOG_REQUESTS: ${LOG_REQUESTS:-false}
+
+volumes:
+  s404_pgdata:
